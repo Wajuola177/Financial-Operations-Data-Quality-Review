@@ -1,0 +1,139 @@
+
+-- 1. Total transaction volume & value overview
+SELECT 
+    COUNT(transaction_id) AS total_records,
+    SUM(transaction_amount) AS total_transaction_value_gbp,
+    COUNT(DISTINCT account_id) AS unique_accounts
+FROM financial_transactions;
+
+-- 2. Count of records with NULL/missing critical values
+SELECT 
+    COUNT(*) AS total_checked,
+    SUM(CASE WHEN transaction_id IS NULL THEN 1 ELSE 0 END) AS missing_transaction_id,
+    SUM(CASE WHEN account_id IS NULL THEN 1 ELSE 0 END) AS missing_account_id,
+    SUM(CASE WHEN transaction_amount IS NULL THEN 1 ELSE 0 END) AS missing_amount,
+    SUM(CASE WHEN transaction_date IS NULL THEN 1 ELSE 0 END) AS missing_date
+FROM financial_transactions;
+
+-- 3. Duplicate transaction detection (same amount, date, account)
+SELECT 
+    account_id, transaction_date, transaction_amount,
+    COUNT(*) AS duplicate_count,
+    GROUP_CONCAT(transaction_id SEPARATOR ', ') AS duplicate_record_ids
+FROM financial_transactions
+GROUP BY account_id, transaction_date, transaction_amount
+HAVING COUNT(*) > 1;
+
+-- 4. Transactions with negative or zero values (potential errors)
+SELECT 
+    transaction_id, account_id, transaction_date, 
+    transaction_amount, transaction_type
+FROM financial_transactions
+WHERE transaction_amount <= 0;
+
+-- 5. Format inconsistency check: transaction_type values
+SELECT 
+    DISTINCT transaction_type,
+    COUNT(transaction_id) AS record_count
+FROM financial_transactions
+GROUP BY transaction_type
+ORDER BY transaction_type;
+
+-- 6. Monthly totals vs general ledger reconciliation comparison
+SELECT 
+    DATE_FORMAT(transaction_date, '%Y-%m') AS recon_month,
+    SUM(transaction_amount) AS system_calculated_total,
+    ledger_reported_total,
+    SUM(transaction_amount) - ledger_reported_total AS variance_amount,
+    ROUND(
+        (SUM(transaction_amount) - ledger_reported_total)/ledger_reported_total * 100, 
+    2) AS variance_percentage
+FROM financial_transactions t
+JOIN gl_control_totals g 
+    ON DATE_FORMAT(t.transaction_date, '%Y-%m') = g.report_month
+GROUP BY recon_month, ledger_reported_total;
+
+-- 7. Transactions falling outside standard operating hours
+SELECT 
+    transaction_id, account_id, transaction_date, transaction_time
+FROM financial_transactions
+WHERE HOUR(transaction_time) NOT BETWEEN 8 AND 18;
+
+-- 8. Accounts with unreconciled differences
+SELECT 
+    account_id,
+    COUNT(transaction_id) AS transaction_count,
+    SUM(transaction_amount) AS net_activity,
+    SUM(statement_balance) - SUM(ledger_balance) AS net_difference
+FROM financial_transactions
+GROUP BY account_id
+HAVING ABS(net_difference) > 0;
+
+-- 9. Percentage completeness score per data field
+SELECT 
+    'transaction_id' AS field_name, 
+    ROUND(COUNT(transaction_id)/COUNT(*)*100, 2) AS completeness_pct FROM financial_transactions
+UNION ALL
+SELECT 'account_id', ROUND(COUNT(account_id)/COUNT(*)*100, 2) FROM financial_transactions
+UNION ALL
+SELECT 'transaction_amount', ROUND(COUNT(transaction_amount)/COUNT(*)*100, 2) FROM financial_transactions
+UNION ALL
+SELECT 'transaction_date', ROUND(COUNT(transaction_date)/COUNT(*)*100, 2) FROM financial_transactions;
+
+-- 10. Large-value transactions flagged for validation
+SELECT 
+    transaction_id, account_id, transaction_date, 
+    transaction_amount, transaction_type
+FROM financial_transactions
+WHERE transaction_amount > 50000
+ORDER BY transaction_amount DESC;
+
+-- 11. Out-of-period postings (after month-end close)
+SELECT 
+    transaction_id, account_id, transaction_date, period_closed_date
+FROM financial_transactions
+WHERE transaction_date > period_closed_date;
+
+-- 12. Summary of data quality issues by category
+SELECT 
+    'Missing Amount' AS issue_type, COUNT(*) AS record_count
+FROM financial_transactions WHERE transaction_amount IS NULL
+UNION ALL
+SELECT 'Missing Date', COUNT(*) FROM financial_transactions WHERE transaction_date IS NULL
+UNION ALL
+SELECT 'Negative Amount', COUNT(*) FROM financial_transactions WHERE transaction_amount < 0
+UNION ALL
+SELECT 'Duplicate Found', COUNT(*) FROM (
+    SELECT transaction_id FROM financial_transactions
+    GROUP BY account_id, transaction_date, transaction_amount
+    HAVING COUNT(*) > 1
+) t;
+
+-- 13. Average transaction value per account type
+SELECT 
+    account_type,
+    COUNT(transaction_id) AS total_transactions,
+    ROUND(AVG(transaction_amount), 2) AS avg_transaction_value,
+    SUM(transaction_amount) AS total_value
+FROM financial_transactions
+GROUP BY account_type;
+
+-- 14. Trend of data errors over time
+SELECT 
+    DATE_FORMAT(COALESCE(transaction_date, created_at), '%Y-%m') AS record_month,
+    SUM(CASE WHEN transaction_amount IS NULL THEN 1 ELSE 0 END) AS missing_amount_count,
+    SUM(CASE WHEN transaction_amount < 0 THEN 1 ELSE 0 END) AS negative_amount_count
+FROM financial_transactions
+GROUP BY record_month
+ORDER BY record_month DESC;
+
+-- 15. Accounts with highest unreconciled value
+SELECT 
+    account_id,
+    ABS(SUM(statement_balance - ledger_balance)) AS discrepancy_size,
+    COUNT(transaction_id) AS transaction_volume
+FROM financial_transactions
+GROUP BY account_id
+HAVING discrepancy_size > 0
+ORDER BY discrepancy_size DESC
+LIMIT 10;
